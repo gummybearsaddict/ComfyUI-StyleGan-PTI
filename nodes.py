@@ -206,16 +206,21 @@ class BlendStyleGANLatents:
             "required": {
                 "latent_1": ("STYLEGAN_LATENT", ),
                 "latent_2": ("STYLEGAN_LATENT", ),
-                "blend": ("FLOAT", {"default": 0.5, "min": -10.0, "max": 10.0, "step": 0.001}),
-                "mode": (["lerp", "slerp"],),
+                "blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "mode": (["smooth_layers", "slerp", "lerp", "custom_zones"], {"default": "smooth_layers"}),
             },
+            "optional": {
+                "coarse_blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "medium_blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "fine_blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
         }
     
     RETURN_TYPES = ("STYLEGAN_LATENT",)
     FUNCTION = "generate_latent"
     CATEGORY = "StyleGAN/extra"
     
-    def generate_latent(self, latent_1, latent_2, blend, mode):
+    def generate_latent(self, latent_1, latent_2, blend, mode, coarse_blend=0.5, medium_blend=0.5, fine_blend=0.5):
         # Defensive check: if full training trajectories were connected instead of final_latent
         if latent_1.ndim == 3 and latent_1.shape[0] > 1:
             print(f"[BlendStyleGANLatents] Note: latent_1 has batch size {latent_1.shape[0]} (likely from 'training_latents'). Auto-slicing to final latent [-1:].")
@@ -227,7 +232,31 @@ class BlendStyleGANLatents:
         if latent_1.shape != latent_2.shape:
             raise Exception(f"latent_1 shape {latent_1.shape} and latent_2 shape {latent_2.shape} do not match!")
         
-        if mode == "slerp":
+        num_layers = latent_1.shape[1]
+
+        if mode == "smooth_layers":
+            # Perceptual staggered layer blend: fine layers lead, coarse layers follow smoothly
+            # Prevents geometric collisions and abstract collapse across any two images
+            weights = []
+            for i in range(num_layers):
+                p = i / float(max(1, num_layers - 1)) # 0.0 at coarse, 1.0 at fine
+                center = 0.3 * (1.0 - p) + 0.35
+                w = torch.clamp((torch.tensor(blend, dtype=torch.float32) - center + 0.35) / 0.70, 0.0, 1.0)
+                w = 3.0 * (w**2) - 2.0 * (w**3) # smoothstep
+                weights.append(w.item())
+            w_tensor = torch.tensor(weights, dtype=latent_1.dtype, device=latent_1.device).view(1, num_layers, 1)
+            z = (1.0 - w_tensor) * latent_1 + w_tensor * latent_2
+
+        elif mode == "custom_zones":
+            # Direct multi-scale control: Coarse (0..4), Medium (5..9), Fine (10..end)
+            c_end = min(5, num_layers)
+            m_end = min(10, num_layers)
+            z_coarse = (1.0 - coarse_blend) * latent_1[:, :c_end, :] + coarse_blend * latent_2[:, :c_end, :]
+            z_medium = (1.0 - medium_blend) * latent_1[:, c_end:m_end, :] + medium_blend * latent_2[:, c_end:m_end, :]
+            z_fine = (1.0 - fine_blend) * latent_1[:, m_end:, :] + fine_blend * latent_2[:, m_end:, :]
+            z = torch.cat([z_coarse, z_medium, z_fine], dim=1)
+
+        elif mode == "slerp":
             z = slerp(latent_1, latent_2, blend)
         else:
             z = torch.lerp(latent_1, latent_2, blend)
@@ -239,9 +268,11 @@ class StyleGANStyleMixing:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "latent_structure": ("STYLEGAN_LATENT", ),
-                "latent_style": ("STYLEGAN_LATENT", ),
-                "crossover_layer": ("INT", {"default": 7, "min": 1, "max": 17, "step": 1}),
+                "latent_1": ("STYLEGAN_LATENT", ),
+                "latent_2": ("STYLEGAN_LATENT", ),
+                "structure_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "style_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "crossover_layer": ("INT", {"default": 7, "min": 1, "max": 16, "step": 1}),
             },
         }
 
@@ -249,26 +280,28 @@ class StyleGANStyleMixing:
     FUNCTION = "mix_styles"
     CATEGORY = "StyleGAN/extra"
 
-    def mix_styles(self, latent_structure, latent_style, crossover_layer):
+    def mix_styles(self, latent_1, latent_2, structure_blend, style_blend, crossover_layer):
         # Defensive check: if full training trajectories were connected instead of final_latent
-        if latent_structure.ndim == 3 and latent_structure.shape[0] > 1:
-            latent_structure = latent_structure[-1:]
-        if latent_style.ndim == 3 and latent_style.shape[0] > 1:
-            latent_style = latent_style[-1:]
+        if latent_1.ndim == 3 and latent_1.shape[0] > 1:
+            latent_1 = latent_1[-1:]
+        if latent_2.ndim == 3 and latent_2.shape[0] > 1:
+            latent_2 = latent_2[-1:]
 
-        if latent_structure.shape != latent_style.shape:
-            raise Exception(f"latent_structure shape {latent_structure.shape} and latent_style shape {latent_style.shape} do not match!")
+        if latent_1.shape != latent_2.shape:
+            raise Exception(f"latent_1 shape {latent_1.shape} and latent_2 shape {latent_2.shape} do not match!")
 
-        total_layers = latent_structure.shape[1]
+        total_layers = latent_1.shape[1]
         crossover = min(max(1, crossover_layer), total_layers - 1)
 
-        # Style Mixing: Layers 0..crossover from structure, crossover..end from style
-        mixed_latent = torch.cat([
-            latent_structure[:, :crossover, :],
-            latent_style[:, crossover:, :]
-        ], dim=1)
+        # Structure layers (0..crossover): blended with structure_blend (0.0 = 100% latent_1, 1.0 = 100% latent_2)
+        struct_layers = (1.0 - structure_blend) * latent_1[:, :crossover, :] + structure_blend * latent_2[:, :crossover, :]
 
-        print(f"[StyleGANStyleMixing] Transplanted {crossover} structure layers (0..{crossover-1}) with {total_layers - crossover} style layers ({crossover}..{total_layers-1})")
+        # Style layers (crossover..end): blended with style_blend (0.0 = 100% latent_1, 1.0 = 100% latent_2)
+        style_layers = (1.0 - style_blend) * latent_1[:, crossover:, :] + style_blend * latent_2[:, crossover:, :]
+
+        mixed_latent = torch.cat([struct_layers, style_layers], dim=1)
+
+        print(f"[StyleGANStyleMixing] Layers 0..{crossover-1} structure blend={structure_blend:.2f} | Layers {crossover}..{total_layers-1} style blend={style_blend:.2f}")
         return (mixed_latent, )
 
 class BatchAverageStyleGANLatents:

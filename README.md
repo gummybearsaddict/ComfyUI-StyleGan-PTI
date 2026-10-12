@@ -61,18 +61,29 @@ Fine-tunes the generator weights around inverted pivot latents using a combined 
 - Configurable steps, learning rate, and loss weights (`l1_weight`, `lpips_weight`).
 - Optional checkpoint exporter to save fine-tuned `.pkl` generators directly to `ComfyUI/models/stylegan/`.
 
-### 2. StyleGAN Style Mixing (Layer Slicing) (New!)
-Enables surgical layer-by-layer transplantation between two latent representations instead of uniform blending.
-- `latent_structure`: Provides coarse/geometric layers (perspective, overall architecture, pose).
-- `latent_style`: Provides fine layers (colors, lighting, foliage, micro-textures).
-- `crossover_layer`: Control cutoff point (1 to 16, default: 7). Allows creating recognizable hybrids (e.g. Cathedral structure with Forest foliage & lighting).
+### 2. Multi-Scale Blend & Interpolation (`BlendStyleGANLatents`)
+Interpolate between any two arbitrary images with four distinct blending modes:
+- **`smooth_layers` (Recommended default)**: Perceptual wave across generator layers (fine layers lead transition, coarse layers follow smoothly). Guarantees that **any two images blend cleanly across the entire 0.0 to 1.0 spectrum without turning into an abstract blur**.
+- **`custom_zones`**: Independent control over 3 anatomical scale bands:
+  - `coarse_blend` (Layers 0..4): Geometry, perspective, macro composition.
+  - `medium_blend` (Layers 5..9): Objects, silhouettes, major features.
+  - `fine_blend` (Layers 10..15): Lighting, color palette, micro-textures.
+- **`slerp`**: Spherical linear interpolation across all latent dimensions.
+- **`lerp`**: Standard linear interpolation.
 
-### 3. W+ and W Space Inversion with Luminance Anchor
+### 3. Layer-Wise Style Mixing (`StyleGANStyleMixing`)
+Enables surgical transplantation and independent percentage blending between two images:
+- `latent_1` & `latent_2`: Any two StyleGAN latents.
+- `crossover_layer`: Layer cutoff dividing structure from style (1 to 16, default: 7).
+- `structure_blend`: Percentage blend of `latent_2` into the structure layers (0.0 = 100% latent_1, 1.0 = 100% latent_2).
+- `style_blend`: Percentage blend of `latent_2` into the style layers (0.0 = 100% latent_1, 1.0 = 100% latent_2).
+
+### 4. W+ and W Space Inversion with Luminance Anchor
 - Select between `"W+"` (default, optimizes 16 independent layer vectors for photographic fidelity) and `"W"` (single shared vector).
 - Added `pixel_weight` to `StyleGANInversion` to anchor dynamic range and color palette against dark scenes, preventing low-key collapse.
 - Default steps optimized to 250 for faster convergence without latent over-fitting.
 
-### 4. Adaptive Dynamic Range Recovery
+### 5. Adaptive Dynamic Range Recovery
 - `StyleGANSampler` includes adaptive contrast recovery to guard against crushed shadow values ($\le -1.0$) or saturation blowouts.
 
 ## Example Workflow
