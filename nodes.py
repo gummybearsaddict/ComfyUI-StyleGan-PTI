@@ -139,6 +139,7 @@ class StyleGANInversion:
                 "noise_ramp_length": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "regularize_noise_weight": ("FLOAT", {"default": 30000.0, "min": 0.0, "max": 1e7}),
                 "pixel_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 50.0, "step": 0.1}),
+                "latent_space": (["W+", "W"], {"default": "W+"}),
             },
         }
     
@@ -161,6 +162,7 @@ class StyleGANInversion:
         noise_ramp_length,
         regularize_noise_weight,
         pixel_weight=1.0,
+        latent_space="W+",
         ):
         
         device = torch.device('cuda:0')
@@ -186,6 +188,7 @@ class StyleGANInversion:
             noise_ramp_length           = noise_ramp_length,
             regularize_noise_weight     = regularize_noise_weight,
             pixel_weight                = pixel_weight,
+            latent_space                = latent_space,
             device                      = device,
             )
         
@@ -230,6 +233,43 @@ class BlendStyleGANLatents:
             z = torch.lerp(latent_1, latent_2, blend)
         
         return (z, )
+
+class StyleGANStyleMixing:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "latent_structure": ("STYLEGAN_LATENT", ),
+                "latent_style": ("STYLEGAN_LATENT", ),
+                "crossover_layer": ("INT", {"default": 7, "min": 1, "max": 17, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STYLEGAN_LATENT",)
+    FUNCTION = "mix_styles"
+    CATEGORY = "StyleGAN/extra"
+
+    def mix_styles(self, latent_structure, latent_style, crossover_layer):
+        # Defensive check: if full training trajectories were connected instead of final_latent
+        if latent_structure.ndim == 3 and latent_structure.shape[0] > 1:
+            latent_structure = latent_structure[-1:]
+        if latent_style.ndim == 3 and latent_style.shape[0] > 1:
+            latent_style = latent_style[-1:]
+
+        if latent_structure.shape != latent_style.shape:
+            raise Exception(f"latent_structure shape {latent_structure.shape} and latent_style shape {latent_style.shape} do not match!")
+
+        total_layers = latent_structure.shape[1]
+        crossover = min(max(1, crossover_layer), total_layers - 1)
+
+        # Style Mixing: Layers 0..crossover from structure, crossover..end from style
+        mixed_latent = torch.cat([
+            latent_structure[:, :crossover, :],
+            latent_style[:, crossover:, :]
+        ], dim=1)
+
+        print(f"[StyleGANStyleMixing] Transplanted {crossover} structure layers (0..{crossover-1}) with {total_layers - crossover} style layers ({crossover}..{total_layers-1})")
+        return (mixed_latent, )
 
 class BatchAverageStyleGANLatents:
     @classmethod
@@ -363,6 +403,7 @@ NODE_CLASS_MAPPINGS = {
     "GenerateStyleGANLatent": GenerateStyleGANLatent,
     "StyleGANSampler": StyleGANSampler,
     "BlendStyleGANLatents": BlendStyleGANLatents,
+    "StyleGANStyleMixing": StyleGANStyleMixing,
     "BatchAverageStyleGANLatents": BatchAverageStyleGANLatents,
     "StyleGANLatentFromBatch": StyleGANLatentFromBatch,
     "StyleGANInversion": StyleGANInversion,
@@ -374,6 +415,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GenerateStyleGANLatent": "Generate StyleGAN Latent",
     "StyleGANSampler": "StyleGAN Sampler",
     "BlendStyleGANLatents": "Blend StyleGAN Latents (lerp or slerp)",
+    "StyleGANStyleMixing": "StyleGAN Style Mixing (Layer Slicing)",
     "BatchAverageStyleGANLatents": "Batch Average StyleGAN Latents",
     "StyleGANLatentFromBatch": "StyleGAN Latent From Batch",
     "StyleGANInversion": "StyleGAN Inversion",

@@ -58,11 +58,13 @@ def project(
     noise_ramp_length          = 0.75,
     regularize_noise_weight    = 30000.0,
     pixel_weight               = 1.0,
+    latent_space               = "W+",
     device: torch.device
 ):
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
 
     G = copy.deepcopy(G).eval().requires_grad_(False).to(device) # type: ignore
+    num_ws = G.mapping.num_ws
 
     # Compute w stats.
     print(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
@@ -90,8 +92,16 @@ def project(
     target_vgg = target_images.clone()
     target_features = vgg16(target_vgg, resize_images=False, return_lpips=True)
 
-    w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True) # pylint: disable=not-callable
-    w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
+    # Setup optimization latent space (W+ vs W)
+    if latent_space == "W+":
+        print(f"[StyleGAN Inversion] Optimizing in W+ space ({num_ws} independent layer latents, {num_ws * G.z_dim} params)")
+        w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device).repeat([1, num_ws, 1]).clone().detach().requires_grad_(True)
+        w_out = torch.zeros([num_steps, num_ws, G.z_dim], dtype=torch.float32, device=device)
+    else:
+        print(f"[StyleGAN Inversion] Optimizing in single W space (1 shared latent, {G.z_dim} params)")
+        w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True)
+        w_out = torch.zeros([num_steps, 1, G.z_dim], dtype=torch.float32, device=device)
+
     optimizer = torch.optim.AdamW([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
 
     # Init noise.
@@ -102,7 +112,7 @@ def project(
     pbar = None
     if PROGRESS_BAR_ENABLED and num_steps > 1:
         pbar = ProgressBar(num_steps)
-    tq_bar = tqdm.trange(num_steps, desc="Projecting")
+    tq_bar = tqdm.trange(num_steps, desc=f"Projecting ({latent_space})")
     for step in tq_bar:
         # Learning rate schedule.
         t = step / num_steps
@@ -116,7 +126,11 @@ def project(
 
         # Synth images from opt_w.
         w_noise = torch.randn_like(w_opt) * w_noise_scale
-        ws = (w_opt + w_noise).repeat([1, G.mapping.num_ws, 1])
+        if latent_space == "W+":
+            ws = w_opt + w_noise
+        else:
+            ws = (w_opt + w_noise).repeat([1, num_ws, 1])
+
         synth_images = G.synthesis(ws, noise_mode='const')
 
         # Pixel luminance anchor in [0, 1] range (prevents dark collapse on out-of-domain targets)
@@ -151,7 +165,7 @@ def project(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        tq_bar.set_postfix_str(f"dist: {dist:.2f} l1: {pixel_loss:.3f} total: {float(loss):<5.2f}")
+        tq_bar.set_postfix_str(f"dist: {dist.item():.2f} l1: {pixel_loss.item():.3f} total: {loss.item():<5.2f}")
 
         # Save projected W for each optimization step.
         w_out[step] = w_opt.detach()[0]
@@ -165,7 +179,11 @@ def project(
         if pbar is not None:
             pbar.update(1)
 
-    result = w_out.repeat([1, G.mapping.num_ws, 1])
+    if latent_space == "W+":
+        result = w_out
+    else:
+        result = w_out.repeat([1, num_ws, 1])
+
     del G, vgg16, optimizer, target_features, target_images, target_vgg, w_opt, w_out
     torch.cuda.empty_cache()
     return result

@@ -61,11 +61,18 @@ Fine-tunes the generator weights around inverted pivot latents using a combined 
 - Configurable steps, learning rate, and loss weights (`l1_weight`, `lpips_weight`).
 - Optional checkpoint exporter to save fine-tuned `.pkl` generators directly to `ComfyUI/models/stylegan/`.
 
-### 2. Enhanced Inversion with Luminance Anchor
+### 2. StyleGAN Style Mixing (Layer Slicing) (New!)
+Enables surgical layer-by-layer transplantation between two latent representations instead of uniform blending.
+- `latent_structure`: Provides coarse/geometric layers (perspective, overall architecture, pose).
+- `latent_style`: Provides fine layers (colors, lighting, foliage, micro-textures).
+- `crossover_layer`: Control cutoff point (1 to 16, default: 7). Allows creating recognizable hybrids (e.g. Cathedral structure with Forest foliage & lighting).
+
+### 3. W+ and W Space Inversion with Luminance Anchor
+- Select between `"W+"` (default, optimizes 16 independent layer vectors for photographic fidelity) and `"W"` (single shared vector).
 - Added `pixel_weight` to `StyleGANInversion` to anchor dynamic range and color palette against dark scenes, preventing low-key collapse.
 - Default steps optimized to 250 for faster convergence without latent over-fitting.
 
-### 3. Adaptive Dynamic Range Recovery
+### 4. Adaptive Dynamic Range Recovery
 - `StyleGANSampler` includes adaptive contrast recovery to guard against crushed shadow values ($\le -1.0$) or saturation blowouts.
 
 ## Example Workflow
@@ -73,4 +80,4 @@ An end-to-end example workflow is included in:
 `workflows/Comfy_StyleGAN3_PTI.json`
 
 Drag and drop this file into ComfyUI to load the full pipeline:
-`Load Images -> Inversion -> Pivotal Tuning -> Latent Blending -> Sampler -> Upscale -> Preview`
+`Load Images -> Inversion (W+) -> Pivotal Tuning -> Latent Blending / Style Mixing -> Sampler -> Upscale -> Preview`
