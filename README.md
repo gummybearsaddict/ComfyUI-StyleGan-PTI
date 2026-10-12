@@ -7,10 +7,11 @@ Original:
 https://github.com/NVlabs/stylegan3
 
 Models:  
-https://catalog.ngc.nvidia.com/orgs/nvidia/teams/research/models/stylegan2/files  
-https://catalog.ngc.nvidia.com/orgs/nvidia/teams/research/models/stylegan3/files  
+- **Tuned Checkpoint (`stylegan_tuned.pkl`)**: [Download from Releases](https://github.com/gummybearsaddict/ComfyUI-StyleGan-PTI/releases/download/v1.0.0/stylegan_tuned.pkl) (or visit the [v1.0.0 Release page](https://github.com/gummybearsaddict/ComfyUI-StyleGan-PTI/releases/tag/v1.0.0))
+- **Official Nvidia StyleGAN2 Checkpoints**: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/research/models/stylegan2/files  
+- **Official Nvidia StyleGAN3 Checkpoints**: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/research/models/stylegan3/files  
 
-Place any models you want to use in `ComfyUI/models/stylegan/*.pkl` (create the folder if it doesn't exist)
+Place any models you want to use in `ComfyUI/models/stylegan/*.pkl` (create the folder if it doesn't exist).
 
 ## Installation
 
