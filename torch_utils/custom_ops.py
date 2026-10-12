@@ -12,6 +12,7 @@ import importlib
 import os
 import re
 import shutil
+import sys
 import uuid
 
 import torch
@@ -77,6 +78,21 @@ def get_plugin(module_name, sources, headers=None, source_dir=None, **build_kwar
 
     # Compile and load.
     try: # pylint: disable=too-many-nested-blocks
+        # Make sure ninja in embedded python Scripts can be found if present
+        python_scripts = os.path.join(os.path.dirname(sys.executable), 'Scripts')
+        if os.path.isdir(python_scripts) and python_scripts not in os.environ.get('PATH', ''):
+            os.environ['PATH'] = python_scripts + ';' + os.environ.get('PATH', '')
+
+        # Fast check: ensure Python.h exists before attempting to compile
+        python_h_found = any(os.path.isfile(os.path.join(p, 'Python.h')) for p in [
+            os.path.join(sys.prefix, 'Include'),
+            os.path.join(sys.prefix, 'include'),
+            os.path.join(sys.base_prefix, 'Include'),
+            os.path.join(sys.base_prefix, 'include'),
+        ])
+        if not python_h_found:
+            raise RuntimeError("Python.h header not found; C++ extension build skipped")
+
         # Make sure we can find the necessary compiler binaries.
         if os.name == 'nt' and os.system("where cl.exe >nul 2>nul") != 0:
             compiler_bindir = _find_compiler_bindir()
@@ -139,6 +155,14 @@ def get_plugin(module_name, sources, headers=None, source_dir=None, **build_kwar
             torch.utils.cpp_extension.load(name=module_name, verbose=verbose_build, sources=sources, **build_kwargs)
 
         # Load.
+        if hasattr(os, 'add_dll_directory'):
+            if 'cached_build_dir' in locals() and os.path.isdir(cached_build_dir):
+                os.add_dll_directory(cached_build_dir)
+            torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
+            if os.path.isdir(torch_lib):
+                os.add_dll_directory(torch_lib)
+        if 'cached_build_dir' in locals() and cached_build_dir not in sys.path:
+            sys.path.insert(0, cached_build_dir)
         module = importlib.import_module(module_name)
 
     except:

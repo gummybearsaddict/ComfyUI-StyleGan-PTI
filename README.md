@@ -51,3 +51,25 @@ StyleGAN3:
 Setting up PyTorch plugin "bias_act_plugin"... Done.
 Setting up PyTorch plugin "filtered_lrelu_plugin"... Done.
 ```  
+
+## Extended Features & New Nodes
+
+### 1. StyleGAN Pivotal Tuning (PTI)
+Fine-tunes the generator weights around inverted pivot latents using a combined Perceptual LPIPS (VGG16) and Pixel L1 loss. This allows high-fidelity reconstruction, editing, and seamless latent blending between distinct images without color collapse.
+- Supports up to 3 target pairs (`image_1` + `latent_1`, `image_2` + `latent_2`, `image_3` + `latent_3`).
+- Configurable steps, learning rate, and loss weights (`l1_weight`, `lpips_weight`).
+- Optional checkpoint exporter to save fine-tuned `.pkl` generators directly to `ComfyUI/models/stylegan/`.
+
+### 2. Enhanced Inversion with Luminance Anchor
+- Added `pixel_weight` to `StyleGANInversion` to anchor dynamic range and color palette against dark scenes, preventing low-key collapse.
+- Default steps optimized to 250 for faster convergence without latent over-fitting.
+
+### 3. Adaptive Dynamic Range Recovery
+- `StyleGANSampler` includes adaptive contrast recovery to guard against crushed shadow values ($\le -1.0$) or saturation blowouts.
+
+## Example Workflow
+An end-to-end example workflow is included in:
+`workflows/Comfy_StyleGAN3_PTI.json`
+
+Drag and drop this file into ComfyUI to load the full pipeline:
+`Load Images -> Inversion -> Pivotal Tuning -> Latent Blending -> Sampler -> Upscale -> Preview`

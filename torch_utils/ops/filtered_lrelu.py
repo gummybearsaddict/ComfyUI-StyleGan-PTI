@@ -23,14 +23,18 @@ _plugin = None
 def _init():
     global _plugin
     if _plugin is None:
-        _plugin = custom_ops.get_plugin(
-            module_name='filtered_lrelu_plugin',
-            sources=['filtered_lrelu.cpp', 'filtered_lrelu_wr.cu', 'filtered_lrelu_rd.cu', 'filtered_lrelu_ns.cu'],
-            headers=['filtered_lrelu.h', 'filtered_lrelu.cu'],
-            source_dir=os.path.dirname(__file__),
-            extra_cuda_cflags=['--use_fast_math', '--allow-unsupported-compiler'],
-        )
-    return True
+        try:
+            _plugin = custom_ops.get_plugin(
+                module_name='filtered_lrelu_plugin',
+                sources=['filtered_lrelu.cpp', 'filtered_lrelu_wr.cu', 'filtered_lrelu_rd.cu', 'filtered_lrelu_ns.cu'],
+                headers=['filtered_lrelu.h', 'filtered_lrelu.cu'],
+                source_dir=os.path.dirname(__file__),
+                extra_cuda_cflags=['--use_fast_math', '--allow-unsupported-compiler'],
+            )
+        except Exception as e:
+            print(f'[ComfyUI-StyleGan] CUDA extension for filtered_lrelu not available ({e}), falling back to PyTorch reference implementation.')
+            _plugin = False
+    return _plugin is not False
 
 def _get_filter_size(f):
     if f is None:

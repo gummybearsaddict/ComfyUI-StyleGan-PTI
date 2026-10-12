@@ -100,8 +100,22 @@ class StyleGANSampler:
         for i in trange(batch_size):
             img = stylegan_model.synthesis(stylegan_latent[i].unsqueeze(0), noise_mode=noise_mode)
             img = torch.permute(img, (0, 2, 3, 1)) # BCHW -> BHWC
-            img = torch.clip(img / 2 + 0.5, 0, 1)  # [-1, 1] -> [0, 1]
-            imgs.append(img)
+            img_norm = img / 2.0 + 0.5
+            
+            # Check for extreme saturation or dynamic range collapse (prevent crushed shadows or blown whites)
+            range_span = (img_norm.max() - img_norm.min()).item()
+            mean_val = img_norm.mean().item()
+            if img_norm.min() >= 0.95 or img_norm.max() <= 0.05 or (range_span < 0.20 and mean_val < 0.05):
+                print(f"[StyleGANSampler] Warning: Output dynamic range collapsed (min={img.min():.2f}, max={img.max():.2f}, mean={mean_val:.3f}, span={range_span:.3f}). Applying adaptive dynamic range recovery.")
+                val_min = img.min()
+                val_max = img.max()
+                if (val_max - val_min) > 1e-5:
+                    img_norm = (img - val_min) / (val_max - val_min)
+                else:
+                    img_norm = torch.clamp(img_norm, 0.0, 1.0)
+            else:
+                img_norm = torch.clamp(img_norm, 0.0, 1.0)
+            imgs.append(img_norm)
             if pbar is not None:
                 pbar.update(1)
         
@@ -116,14 +130,15 @@ class StyleGANInversion:
                 "stylegan_model": ("STYLEGAN", ),
                 "image": ("IMAGE", ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "num_steps": ("INT", {"default": 1000, "min": 1}),
+                "num_steps": ("INT", {"default": 250, "min": 1}),
                 "w_avg_samples": ("INT", {"default": 10000, "min": 1, "max": 100000}),
                 "initial_learning_rate": ("FLOAT", {"default": 0.1, "min": 0.00001, "max": 1.0, "step": 0.00001}),
                 "initial_noise_factor": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "lr_rampdown_length": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "lr_rampup_length": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "noise_ramp_length": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "regularize_noise_weight": ("FLOAT", {"default": 1e5, "min": 0.0, "max": 1e7}),
+                "regularize_noise_weight": ("FLOAT", {"default": 30000.0, "min": 0.0, "max": 1e7}),
+                "pixel_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 50.0, "step": 0.1}),
             },
         }
     
@@ -144,7 +159,8 @@ class StyleGANInversion:
         lr_rampdown_length,
         lr_rampup_length,
         noise_ramp_length,
-        regularize_noise_weight
+        regularize_noise_weight,
+        pixel_weight=1.0,
         ):
         
         device = torch.device('cuda:0')
@@ -152,10 +168,11 @@ class StyleGANInversion:
         target_image = torch.permute(image[...,:3], (0, 3, 1, 2)) # BHWC -> BCHW, RGB only
         if target_image.shape != (stylegan_model.img_channels, img_resolution, img_resolution):
             target_image = F.interpolate(target_image, size=(img_resolution, img_resolution), mode='area')
-        target_image = target_image[0] * 255
+        target_image = (target_image[0] * 255.0).clone()
         
         from .projector import project
         
+        seed = seed % (2**32)
         projected_w_steps = project(
             stylegan_model,
             target_image,
@@ -168,9 +185,15 @@ class StyleGANInversion:
             lr_rampup_length            = lr_rampup_length,
             noise_ramp_length           = noise_ramp_length,
             regularize_noise_weight     = regularize_noise_weight,
+            pixel_weight                = pixel_weight,
             device                      = device,
             )
         
+        del stylegan_model, target_image
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         return (projected_w_steps, projected_w_steps[-1].unsqueeze(0))
 
 class BlendStyleGANLatents:
@@ -181,7 +204,7 @@ class BlendStyleGANLatents:
                 "latent_1": ("STYLEGAN_LATENT", ),
                 "latent_2": ("STYLEGAN_LATENT", ),
                 "blend": ("FLOAT", {"default": 0.5, "min": -10.0, "max": 10.0, "step": 0.001}),
-                "mode": (["slerp", "lerp"],),
+                "mode": (["lerp", "slerp"],),
             },
         }
     
@@ -190,6 +213,14 @@ class BlendStyleGANLatents:
     CATEGORY = "StyleGAN/extra"
     
     def generate_latent(self, latent_1, latent_2, blend, mode):
+        # Defensive check: if full training trajectories were connected instead of final_latent
+        if latent_1.ndim == 3 and latent_1.shape[0] > 1:
+            print(f"[BlendStyleGANLatents] Note: latent_1 has batch size {latent_1.shape[0]} (likely from 'training_latents'). Auto-slicing to final latent [-1:].")
+            latent_1 = latent_1[-1:]
+        if latent_2.ndim == 3 and latent_2.shape[0] > 1:
+            print(f"[BlendStyleGANLatents] Note: latent_2 has batch size {latent_2.shape[0]} (likely from 'training_latents'). Auto-slicing to final latent [-1:].")
+            latent_2 = latent_2[-1:]
+
         if latent_1.shape != latent_2.shape:
             raise Exception(f"latent_1 shape {latent_1.shape} and latent_2 shape {latent_2.shape} do not match!")
         
@@ -240,6 +271,93 @@ class StyleGANLatentFromBatch:
         
         return (w, )
 
+class StyleGANPivotalTuning:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "stylegan_model": ("STYLEGAN", ),
+                "image_1": ("IMAGE", ),
+                "latent_1": ("STYLEGAN_LATENT", ),
+                "steps": ("INT", {"default": 350, "min": 10, "max": 2000, "step": 10}),
+                "learning_rate": ("FLOAT", {"default": 0.00035, "min": 0.00001, "max": 0.01, "step": 0.00005}),
+                "l1_weight": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "lpips_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "save_checkpoint": ("BOOLEAN", {"default": True}),
+                "checkpoint_name": ("STRING", {"default": "stylegan_tuned.pkl"}),
+            },
+            "optional": {
+                "image_2": ("IMAGE", ),
+                "latent_2": ("STYLEGAN_LATENT", ),
+                "image_3": ("IMAGE", ),
+                "latent_3": ("STYLEGAN_LATENT", ),
+            }
+        }
+    
+    RETURN_TYPES = ("STYLEGAN", )
+    FUNCTION = "tune"
+    CATEGORY = "StyleGAN"
+
+    @torch.inference_mode(mode=False)
+    @torch.enable_grad()
+    def tune(
+        self,
+        stylegan_model,
+        image_1,
+        latent_1,
+        steps,
+        learning_rate,
+        l1_weight,
+        lpips_weight,
+        save_checkpoint,
+        checkpoint_name,
+        image_2=None,
+        latent_2=None,
+        image_3=None,
+        latent_3=None,
+    ):
+        device = torch.device('cuda:0')
+        img_resolution = stylegan_model.img_resolution
+
+        def prepare_image(img):
+            tgt = torch.permute(img[..., :3], (0, 3, 1, 2)) # BHWC -> BCHW
+            if tgt.shape[-2:] != (img_resolution, img_resolution):
+                tgt = F.interpolate(tgt, size=(img_resolution, img_resolution), mode='area')
+            return (tgt[0] * 255.0).clone()
+
+        targets = []
+        if image_1 is not None and latent_1 is not None:
+            targets.append({
+                'image': prepare_image(image_1),
+                'latent': latent_1
+            })
+        if image_2 is not None and latent_2 is not None:
+            targets.append({
+                'image': prepare_image(image_2),
+                'latent': latent_2
+            })
+        if image_3 is not None and latent_3 is not None:
+            targets.append({
+                'image': prepare_image(image_3),
+                'latent': latent_3
+            })
+
+        from .pti_trainer import tune_pivotal
+
+        tuned_G = tune_pivotal(
+            G=stylegan_model,
+            targets=targets,
+            num_steps=steps,
+            learning_rate=learning_rate,
+            l1_weight=l1_weight,
+            lpips_weight=lpips_weight,
+            save_checkpoint=save_checkpoint,
+            checkpoint_name=checkpoint_name,
+            device=device,
+        )
+
+        return (tuned_G, )
+
 NODE_CLASS_MAPPINGS = {
     "LoadStyleGAN": LoadStyleGAN,
     "GenerateStyleGANLatent": GenerateStyleGANLatent,
@@ -248,6 +366,7 @@ NODE_CLASS_MAPPINGS = {
     "BatchAverageStyleGANLatents": BatchAverageStyleGANLatents,
     "StyleGANLatentFromBatch": StyleGANLatentFromBatch,
     "StyleGANInversion": StyleGANInversion,
+    "StyleGANPivotalTuning": StyleGANPivotalTuning,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -258,4 +377,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BatchAverageStyleGANLatents": "Batch Average StyleGAN Latents",
     "StyleGANLatentFromBatch": "StyleGAN Latent From Batch",
     "StyleGANInversion": "StyleGAN Inversion",
+    "StyleGANPivotalTuning": "StyleGAN Pivotal Tuning (PTI)",
 }

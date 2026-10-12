@@ -48,7 +48,7 @@ def project(
     G,
     target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
     *,
-    num_steps                  = 1000,
+    num_steps                  = 250,
     w_avg_samples              = 10000,
     seed                       = 0,
     initial_learning_rate      = 0.1,
@@ -56,7 +56,8 @@ def project(
     lr_rampdown_length         = 0.25,
     lr_rampup_length           = 0.05,
     noise_ramp_length          = 0.75,
-    regularize_noise_weight    = 1e5,
+    regularize_noise_weight    = 30000.0,
+    pixel_weight               = 1.0,
     device: torch.device
 ):
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
@@ -65,9 +66,10 @@ def project(
 
     # Compute w stats.
     print(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    z_samples = np.random.RandomState(seed).randn(w_avg_samples, G.z_dim)
+    np_seed = seed % (2**32)
+    np.random.seed(np_seed)
+    torch.manual_seed(seed % (2**64))
+    z_samples = np.random.RandomState(np_seed).randn(w_avg_samples, G.z_dim)
     w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
     w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)       # [N, 1, C]
     w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
@@ -82,7 +84,11 @@ def project(
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
     if target_images.shape[2] > 256:
         target_images = F.interpolate(target_images, size=(256, 256), mode='area')
-    target_features = vgg16(target_images, resize_images=False, return_lpips=True)
+    target_norm = target_images / 255.0
+
+    # Clone before passing to vgg16 because TorchScript vgg16 modifies its input in-place
+    target_vgg = target_images.clone()
+    target_features = vgg16(target_vgg, resize_images=False, return_lpips=True)
 
     w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True) # pylint: disable=not-callable
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
@@ -113,13 +119,20 @@ def project(
         ws = (w_opt + w_noise).repeat([1, G.mapping.num_ws, 1])
         synth_images = G.synthesis(ws, noise_mode='const')
 
-        # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
-        synth_images = (synth_images + 1) * (255/2)
-        if synth_images.shape[2] > 256:
-            synth_images = F.interpolate(synth_images, size=(256, 256), mode='area')
+        # Pixel luminance anchor in [0, 1] range (prevents dark collapse on out-of-domain targets)
+        synth_norm = (synth_images + 1.0) * 0.5
+        if synth_norm.shape[2] > 256:
+            synth_norm = F.interpolate(synth_norm, size=(256, 256), mode='area')
+        pixel_loss = F.l1_loss(synth_norm, target_norm)
 
-        # Features for synth images.
-        synth_features = vgg16(synth_images, resize_images=False, return_lpips=True)
+        # Downsample image to 256x256 if larger. VGG was built for 224x224 images.
+        synth_images_255 = (synth_images + 1.0) * (255.0 / 2.0)
+        if synth_images_255.shape[2] > 256:
+            synth_images_255 = F.interpolate(synth_images_255, size=(256, 256), mode='area')
+
+        # Features for synth images (clone to avoid in-place corruption)
+        synth_vgg = synth_images_255.clone()
+        synth_features = vgg16(synth_vgg, resize_images=False, return_lpips=True)
         dist = (target_features - synth_features).square().sum()
 
         # Noise regularization.
@@ -132,14 +145,13 @@ def project(
                 if noise.shape[2] <= 8:
                     break
                 noise = F.avg_pool2d(noise, kernel_size=2)
-        loss = dist + reg_loss * regularize_noise_weight
-        # loss.requires_grad = True
+        loss = dist + pixel_weight * pixel_loss + reg_loss * regularize_noise_weight
 
         # Step
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        tq_bar.set_postfix_str(f"dist: {dist:.2f} total: {float(loss):<5.2f}")
+        tq_bar.set_postfix_str(f"dist: {dist:.2f} l1: {pixel_loss:.3f} total: {float(loss):<5.2f}")
 
         # Save projected W for each optimization step.
         w_out[step] = w_opt.detach()[0]
@@ -153,4 +165,7 @@ def project(
         if pbar is not None:
             pbar.update(1)
 
-    return w_out.repeat([1, G.mapping.num_ws, 1])
+    result = w_out.repeat([1, G.mapping.num_ws, 1])
+    del G, vgg16, optimizer, target_features, target_images, target_vgg, w_opt, w_out
+    torch.cuda.empty_cache()
+    return result
